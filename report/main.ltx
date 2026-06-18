@@ -1,0 +1,769 @@
+\documentclass[11pt,a4paper]{article}
+
+% ====================== Packages ======================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{amsmath, amssymb}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{titling}
+
+\graphicspath{{images/}}
+
+\definecolor{kw}{HTML}{1A73E8}
+\definecolor{str}{HTML}{0F9D58}
+\definecolor{cmt}{HTML}{9AA0A6}
+\definecolor{bg}{HTML}{F5F7FA}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  stringstyle=\color{str},
+  commentstyle=\color{cmt}\itshape,
+  backgroundcolor=\color{bg},
+  frame=single, framesep=4pt, framerule=0pt,
+  numbers=left, numberstyle=\tiny\color{cmt},
+  breaklines=true, showstringspaces=false, captionpos=b,
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=kw,
+  urlcolor=kw,
+  citecolor=kw
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Multilingual Text-to-Image Retrieval}
+\fancyhead[R]{\small \thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% ====================== Title ======================
+\title{
+  \vspace{-1.5cm}
+  \textbf{Multilingual Text-to-Image Retrieval} \\[0.4em]
+  \large A Three-Modality Retrieval System with Fine-Tuned mCLIP \\[0.2em]
+  \large and an Empirical Study of Cross-Lingual Failure Modes
+}
+\author{
+  Veliyeddin Eliyev \\
+  \small \texttt{eliyevveliyeddin3@gmail.com}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ====================== Abstract ======================
+\begin{abstract}
+\noindent We present an end-to-end multilingual text-to-image retrieval
+system that accepts queries through three modalities --- typed text, spoken
+voice, and a reference image --- and retrieves visually relevant photographs
+from a 5{,}000-image MS-COCO gallery using a fine-tuned multilingual CLIP
+encoder. The system pairs a fine-tuned \texttt{M-CLIP/XLM-RoBERTa-Large-Vit-B-32}
+backbone with an OpenAI Whisper-small speech encoder and a FAISS flat-IP
+similarity index, deployed behind a FastAPI server and a React/TypeScript
+single-page frontend. Beyond engineering, we report a controlled
+pretrained-vs-fine-tuned comparison across six languages
+(\textit{en, ar, zh, fr, de, ru}) on 15{,}012 queries, observing that scaling
+training data from 1{,}000 to 5{,}000 images does not lift overall Recall@1
+and we propose a capacity-bottleneck hypothesis to explain this plateau.
+Manual testing in Azerbaijani --- a language outside our fine-tuning set ---
+exposes a \emph{cross-lingual homograph collision} in mCLIP's shared
+embedding space, which we document, characterise, and mitigate in the
+user-facing application through a heuristic warning. The complete system,
+including reproducible scripts, evaluation reports, and frontend, is
+publicly available at
+\url{https://github.com/Bayrii/text2image-multilingual-retrieval}.
+\end{abstract}
+
+\noindent\textbf{Keywords:} multilingual CLIP, cross-modal retrieval, FAISS,
+contrastive learning, speech retrieval, low-resource languages, homograph
+collision.
+
+\vspace{0.5em}
+
+% ====================== 1. Introduction ======================
+\section{Introduction}
+
+\subsection{Motivation}
+Visual search is now embedded in mainstream consumer products: Google Lens,
+Pinterest Lens, Amazon visual search, and e-commerce ``shop the look''
+features all let users find images by describing them, photographing them,
+or pointing a camera at a scene. The overwhelming majority of these systems
+are trained on English-dominated data and degrade sharply when the user
+issues a query in a low-resource language. This biases the experience
+against the very users for whom textual search is hardest to type --- often
+the speakers of scripts that lack ergonomic keyboards (Arabic, Cyrillic,
+ideographic) or users with low literacy in any single language.
+
+This project asks a tractable version of the question: \emph{can a single
+multilingual CLIP-based retrieval system, fine-tuned on a small bilingually
+balanced corpus and deployed on consumer hardware, deliver acceptable
+retrieval quality across high- and low-resource languages, and can it be
+made accessible through voice and image modalities so that text fluency is
+not a prerequisite?}
+
+\subsection{Contributions}
+The contributions of this work are:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item A reproducible pipeline (data collection $\to$ MT-based caption
+    augmentation $\to$ image-id-level split $\to$ fine-tuning $\to$
+    FAISS index build $\to$ evaluation $\to$ serving), runnable end-to-end
+    on a single 6\,GB consumer GPU.
+  \item A three-modality user interface --- text, voice, image --- exposed
+    through a FastAPI backend and a React/TypeScript frontend, with the
+    voice path implemented through OpenAI Whisper-small running on CPU.
+  \item A controlled empirical comparison of pretrained vs.\ fine-tuned
+    mCLIP on identical 15{,}012-query test sets across six languages, with
+    per-language Recall@1, Recall@5, and mAP@10.
+  \item A documented \emph{negative result}: scaling training data
+    fivefold from 1\,K to 5\,K images does not improve overall Recall@1, and
+    we propose a trainable-capacity bottleneck explanation.
+  \item A documented qualitative finding: cross-lingual homograph collisions
+    in mCLIP's shared embedding space, observed during Azerbaijani query
+    testing, together with a heuristic mitigation at the UI layer.
+\end{enumerate}
+
+\subsection{Outline}
+Section~\ref{sec:related} situates the project within prior work on
+multilingual CLIP and cross-lingual retrieval. Section~\ref{sec:arch}
+describes the system architecture. Section~\ref{sec:training} details
+the fine-tuning methodology. Section~\ref{sec:impl} covers implementation.
+Section~\ref{sec:results} presents the quantitative comparison.
+Section~\ref{sec:discussion} discusses the homograph finding and the
+training-data plateau. Section~\ref{sec:future} outlines future work.
+
+% ====================== 2. Related Work ======================
+\section{Related Work}\label{sec:related}
+
+\textbf{CLIP and multilingual CLIP.}
+Radford et al.~\cite{clip} introduced CLIP, a dual-encoder vision--language
+model trained on 400M image--text pairs with a contrastive InfoNCE
+objective. mCLIP~\cite{mclip} replaces the original BPE text encoder with
+\texttt{XLM-RoBERTa-Large}~\cite{xlmr} and re-aligns it to the frozen CLIP
+visual encoder using a multilingual sentence-level alignment loss. The
+resulting model embeds images and text in any of XLM-R's 100 pretrained
+languages into a shared 512-dimensional space. We use the
+\texttt{M-CLIP/XLM-Roberta-Large-Vit-B-32} variant.
+
+\textbf{Whisper.}
+OpenAI's Whisper~\cite{whisper} is an encoder--decoder speech model trained
+on 680{,}000 hours of multilingual web audio. The small variant
+(244M parameters, 250\,MB) supports 99 languages and is small enough to run
+on CPU for short-query inference. We use Whisper-small as the speech front
+end for our voice modality.
+
+\textbf{FAISS.}
+FAISS~\cite{faiss} provides efficient similarity search over dense vector
+collections. For our gallery size (5{,}000 images), the flat inner-product
+index (which is exact, not approximate) is small (10\,MB) and fast enough
+that the two-stage retrieve-and-rerank pattern is unnecessary in practice;
+we keep it for architectural consistency with larger deployments.
+
+\textbf{Cross-lingual embedding limitations.}
+A growing literature documents the fact that shared multilingual embeddings
+trade off per-language fidelity. For LASER~\cite{laser} and
+XLM-R~\cite{xlmr}, low-resource languages occupy compressed regions of the
+shared space, leading to homograph collisions where surface forms shared
+across languages compete for a single representation. Our Azerbaijani
+finding is a specific, query-time observation of this phenomenon in mCLIP.
+
+% ====================== 3. Architecture ======================
+\section{System Architecture}\label{sec:arch}
+
+The system consists of three layers (Figure~\ref{fig:arch}):
+a React frontend, a FastAPI backend that loads the model and indexes once
+at startup via the \texttt{lifespan} mechanism, and the underlying ML
+library composed of the mCLIP wrapper, FAISS indexer, and Whisper handler.
+
+\begin{figure}[h]
+\centering
+\begin{minipage}{0.93\linewidth}
+\begin{verbatim}
++-------------------- frontend/ (React + Vite + TS) ----------------------+
+|                                                                         |
+|   [Text]        [Voice]         [Image]                                 |
+|     |              |               |                                    |
+|     |        audio blob       image file                                |
+|     |              |               |                                    |
+|     +------ HTTP (/api proxy) -----+                                    |
++-----------------------------+-------------------------------------------+
+                              |
++-----------------------------v-------------------------------------------+
+|                                                                         |
+|  backend/ (FastAPI)                                                     |
+|                                                                         |
+|  /search        --> mCLIP text encoder --> FAISS image idx --> rerank   |
+|  /search/voice  --> Whisper-small --> mCLIP text --> FAISS              |
+|  /search/image  --> mCLIP visual encoder --> FAISS image idx            |
+|  /images/*.jpg  --> static                                              |
+|                                                                         |
++-------------------------------------------------------------------------+
+\end{verbatim}
+\end{minipage}
+\caption{High-level system architecture. Three input modalities resolve to
+queries against the same shared 512-d embedding space.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Three input modalities}
+\begin{description}[leftmargin=*]
+\item[Text query.] The user types a natural-language query in any
+  XLM-R-supported language. The backend tokenises the query with the
+  XLM-R-Large tokenizer, runs it through the mCLIP text encoder
+  (\texttt{XLM-RoBERTa-Large} + linear projection to 512-d), L2-normalises
+  the result, and performs an inner-product search against the FAISS image
+  index.
+\item[Voice query.] The frontend records audio via the browser's
+  \texttt{MediaRecorder} API and streams a WebM/Opus blob to the backend.
+  The backend decodes via \texttt{soundfile}, resamples to 16\,kHz mono,
+  and feeds the array to Whisper-small running on CPU. The transcript and
+  the detected language are then routed through the same text-query
+  pipeline.
+\item[Image query.] The frontend uploads a JPEG/PNG/WebP file via a
+  drag-and-drop zone. The backend opens it with PIL, preprocesses it with
+  the CLIP image processor, runs it through the CLIP ViT-B/32 visual
+  encoder, L2-normalises, and queries the FAISS index --- yielding the
+  visually-nearest images in the gallery.
+\end{description}
+
+\subsection{Retrieval}
+We use a two-stage retriever: stage one performs a top-$N=100$ FAISS
+inner-product search, stage two re-ranks the candidates by exact cosine
+similarity against the cached normalised embedding block. For flat indexes
+the two stages return identical ordering; we keep the architecture in
+place because production deployments would substitute an IVF/HNSW index in
+stage one, for which exact re-ranking is essential.
+
+% ====================== 4. Methodology ======================
+\section{Fine-Tuning Methodology}\label{sec:training}
+
+\subsection{Data}
+We start from MS-COCO val2017~\cite{coco}, which contains 5{,}000 images
+each with five human-written English captions (25{,}014 captions total).
+We translate every English caption into Arabic (\textit{ar}), Chinese
+(\textit{zh}), French (\textit{fr}), German (\textit{de}), and Russian
+(\textit{ru}) using the appropriate Helsinki-NLP \texttt{opus-mt-en-X}
+model~\cite{opusmt}, producing 150{,}084 multilingual captions.
+The split is performed at the \emph{image-id level} (4{,}000 train / 500
+val / 500 test images) so that all five captions of any given image stay
+in the same split --- this is critical: caption-level splits leak.
+
+\subsection{Loss function}
+The training loss is the sum of a symmetric InfoNCE term and a
+hard-negative margin term. For a batch with $N$ image-text pairs let
+$I \in \mathbb{R}^{N \times 512}$ and $T \in \mathbb{R}^{N \times 512}$
+be the L2-normalised image and text embeddings. With temperature $\tau$,
+the InfoNCE loss is
+\begin{equation}
+\mathcal{L}_{\text{InfoNCE}}(I, T) = -\frac{1}{2N} \sum_{i=1}^{N}
+\Bigl[
+\log \frac{\exp(I_i T_i^\top / \tau)}
+          {\sum_{j} \exp(I_i T_j^\top / \tau)}
++
+\log \frac{\exp(T_i I_i^\top / \tau)}
+          {\sum_{j} \exp(T_i I_j^\top / \tau)}
+\Bigr].
+\end{equation}
+We additionally select the $k$ hardest in-batch negatives per anchor (those
+with the highest similarity score that are not the positive) and add a
+margin term that penalises confusion with these specifically. The
+temperature is fixed at $\tau = 0.07$ and $k = 1$ hard negative per sample.
+
+\subsection{Architecture and capacity}
+The full mCLIP model has 561M parameters. We freeze the entire CLIP ViT
+visual encoder ($\approx$88M parameters) and the bottom 16 of the 24
+XLM-RoBERTa-Large transformer layers, leaving \textbf{110M trainable
+parameters} concentrated in the top 8 text-encoder layers plus the
+512-dimensional projection. Gradient checkpointing on the text encoder
+reduces peak VRAM at the cost of extra compute, allowing the model to fit
+in the 6\,GB VRAM budget of an RTX 3060 Laptop GPU.
+
+\subsection{Optimization}
+We train with AdamW at learning rate $10^{-5}$, weight decay $0.01$, linear
+warmup of 300 steps, batch size 8 with 16-step gradient accumulation
+(effective batch 128), mixed-precision (\texttt{torch.cuda.amp}), and
+gradient clipping at $\|g\| \leq 1.0$. Early stopping monitors validation
+Recall@1 with patience 4. Maximum epochs is 15 but we observe convergence
+much earlier.
+
+% ====================== 5. Implementation ======================
+\section{Implementation}\label{sec:impl}
+
+\subsection{Backend}
+The backend is a FastAPI application (Python 3.12) that loads all heavy
+state once at server startup via the \texttt{lifespan} context manager and
+exposes four routes:
+
+\begin{lstlisting}[language=Python, caption={Backend routes (excerpt).}]
+@router.post("/search")
+def search(req: SearchRequest, request: Request):
+    retriever = state.two_stage if req.retriever == "two_stage" \
+                                else state.text_bridge
+    results = retriever.retrieve(req.query, top_k=req.top_k)
+    return SearchResponse(query=req.query, results=hits, latency_ms=...)
+
+@router.post("/search/voice")
+async def search_voice(audio: UploadFile, top_k: int = Form(5),
+                       language: str | None = Form(None)):
+    audio_bytes = await audio.read()
+    info = state.voice.transcribe_bytes(audio_bytes, language=language)
+    results = state.two_stage.retrieve(info["text"], top_k=top_k)
+    return VoiceSearchResponse(transcript=info["text"], ...)
+
+@router.post("/search/image")
+async def search_image(image: UploadFile, top_k: int = Form(5)):
+    pil = PILImage.open(io.BytesIO(await image.read())).convert("RGB")
+    emb = state.model.encode_image(preprocess(pil))[0].cpu().numpy()
+    candidates = state.image_indexer.search(emb / norm, top_k)
+    return SearchResponse(query="<image>", results=hits, ...)
+\end{lstlisting}
+
+The image gallery is served as static files from \texttt{/images/}
+(mapped to \texttt{data/images/}); the React frontend builds image URLs
+from the COCO image ID, padded to twelve digits.
+
+\subsection{Frontend}
+The frontend is a Vite-bundled React 18 + TypeScript single-page
+application. Three tabs --- text, voice, image --- share a common
+\texttt{ResultsGallery} component that renders cards with rank/score
+badges and opens an image-lightbox modal on click.
+
+The voice tab uses the browser's \texttt{MediaRecorder} API to capture
+audio. While recording is active, a Web Audio \texttt{AnalyserNode} drives
+a canvas-based live spectrum visualiser, giving the user immediate
+feedback that the microphone is being captured.
+
+The text and voice tabs implement a heuristic warning function
+\texttt{isProbablyShortAze} that flags 1--2 token queries containing
+Azerbaijani-specific characters or known AZ single-token surface forms
+(see \S\ref{sec:homograph}).
+
+\subsection{Reproducibility}
+All hyperparameters live in \texttt{config/config.yaml}. Caches
+(HuggingFace, pip, torch) are redirected to the project root via env
+variables set in \texttt{src/utils.py::setup\_caches}. The complete
+pipeline is reproducible via the eight numbered scripts in
+\texttt{scripts/}, executed in order. Tests covering the data split,
+loss, metrics, retriever ordering, and FastAPI route schemas are in
+\texttt{tests/}.
+
+% ====================== 6. Experiments and Results ======================
+\section{Experiments and Results}\label{sec:results}
+
+\subsection{Evaluation protocol}
+We evaluate on the 500-image test split, which yields 15{,}012 test
+queries (500 images $\times$ 5 captions $\times$ 6 languages, minus a
+small number of empty captions). For each query, we compute Recall@1,
+Recall@5, Recall@10, and mean Average Precision at 10 (mAP@10) by
+treating the image whose caption was used as the single relevant item.
+The same procedure is applied to both the pretrained mCLIP weights
+(downloaded as-is from the M-CLIP HuggingFace repository) and our
+fine-tuned weights (epoch-1 \texttt{best.pt}, val\_R@1 = 0.586).
+
+\subsection{Aggregate metrics}
+Table~\ref{tab:overall} shows the pretrained-vs-fine-tuned comparison
+aggregated across all 15{,}012 queries.
+
+\begin{table}[h]
+\centering
+\caption{Overall pretrained vs.\ fine-tuned mCLIP on 5\,K test set
+(15{,}012 queries).}
+\label{tab:overall}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Metric} & \textbf{Pretrained} & \textbf{Fine-tuned} & \textbf{$\Delta$} \\
+\midrule
+R@1      & 0.2649 & 0.2645 & $-0.0004$ \\
+R@5      & 0.5007 & 0.5079 & $+0.0072$ \\
+mAP@10   & 0.3677 & 0.3684 & $+0.0007$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-language metrics}
+Table~\ref{tab:perlang} disaggregates the comparison by language.
+Figure~\ref{fig:r1r5} visualises the per-language R@1 and R@5;
+Figure~\ref{fig:gaingap} visualises the fine-tuning delta and the
+cross-lingual gap.
+
+\begin{table}[h]
+\centering
+\caption{Per-language Recall@1 / Recall@5 / mAP@10 with fine-tuning delta.
+Each language has 2{,}502 test queries.}
+\label{tab:perlang}
+\small
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Lang} &
+\textbf{R@1 (pre)} & \textbf{R@1 (fine)} & \textbf{$\Delta$R@1} &
+\textbf{R@5 (fine)} & \textbf{$\Delta$R@5} &
+\textbf{mAP@10 (fine)} & \textbf{$\Delta$mAP} \\
+\midrule
+ar      & 0.2366 & 0.2382 & $+0.0016$ & 0.4692 & $+0.0180$ & 0.3364 & $+0.0046$ \\
+de      & 0.2690 & 0.2714 & $+0.0024$ & 0.5160 & $-0.0032$ & 0.3780 & $+0.0025$ \\
+en      & 0.2902 & 0.2882 & $-0.0020$ & 0.5364 & $+0.0108$ & 0.3933 & $-0.0001$ \\
+fr      & 0.2766 & 0.2786 & $+0.0020$ & 0.5264 & $+0.0088$ & 0.3827 & $+0.0009$ \\
+ru      & 0.2670 & 0.2566 & $-0.0104$ & 0.5064 & $+0.0104$ & 0.3626 & $-0.0053$ \\
+zh      & 0.2502 & 0.2542 & $+0.0040$ & 0.4928 & $-0.0016$ & 0.3575 & $+0.0015$ \\
+\midrule
+\textbf{overall} & \textbf{0.2649} & \textbf{0.2645} & $-0.0004$ & \textbf{0.5079} & $+0.0072$ & \textbf{0.3684} & $+0.0007$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{compare_r1}
+\caption{R@1 per language.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{compare_r5}
+\caption{R@5 per language.}
+\end{subfigure}
+\caption{Per-language retrieval quality before and after fine-tuning.}
+\label{fig:r1r5}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{gain_r1}
+\caption{Fine-tuning gain ($\Delta$R@1) per language.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{resource_gap}
+\caption{Cross-lingual gap: MT corpus size vs.\ R@1.}
+\end{subfigure}
+\caption{Fine-tuning gain and the cross-lingual gap.}
+\label{fig:gaingap}
+\end{figure}
+
+\subsection{Observations}
+\begin{enumerate}[leftmargin=*,nosep]
+  \item \textbf{Overall lift is essentially zero.} Fine-tuning produces a
+    $-0.04$\,pp R@1 change, a $+0.72$\,pp R@5 change, and a $+0.07$\,pp
+    mAP@10 change. None of these is operationally meaningful at the 5\,K
+    scale.
+  \item \textbf{Languages do not move together.} Chinese gains
+    $+0.40$\,pp R@1, Russian regresses by $-1.04$\,pp R@1, and
+    en/de/fr are essentially flat. R@5 improves for the historically
+    weakest language, Arabic ($+1.80$\,pp), where R@1 barely moves.
+  \item \textbf{Cross-lingual gap is preserved.} English leads, then
+    French/German, then Russian/Chinese, with Arabic trailing by 5--7\,pp
+    at R@1. The fine-tune does not collapse the gap; it preserves the
+    pretrained ordering (Figure~\ref{fig:gaingap}b).
+\end{enumerate}
+
+\subsection{Comparison with the 1\,K data baseline (v2)}
+A prior experiment of ours fine-tuned the same mCLIP architecture with the
+same hyperparameters on a 1{,}000-image subset (referred to as \emph{v2}),
+yielding overall $\Delta$R@1 = $+0.94$\,pp on a 3{,}006-query test set.
+The 5\,K experiment was undertaken to test whether more data would
+improve the lift. The negative result is unambiguous: the lift is
+\emph{smaller} on 5\,K. Figure~\ref{fig:v2compare} shows the v2
+per-language plots for reference.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.46\textwidth}
+\centering
+\includegraphics[width=\linewidth]{v2_compare_r1}
+\caption{v2 (1\,K data) per-language R@1.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.46\textwidth}
+\centering
+\includegraphics[width=\linewidth]{v2_gain_r1}
+\caption{v2 (1\,K data) $\Delta$R@1.}
+\end{subfigure}
+\caption{For reference: prior 1\,K experiment (v2). Absolute R@1 values are
+higher because the test gallery is smaller (100 unique images, versus 500
+in the 5\,K experiment); only $\Delta$ values are comparable across the
+two scales.}
+\label{fig:v2compare}
+\end{figure}
+
+% ====================== 7. Discussion ======================
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Why more data did not help}
+\label{sec:plateau}
+The naive hypothesis would be that more training data is monotonically
+better. The data disproves this: 5$\times$ more captions per language
+produced a smaller fine-tuning lift than the 1\,K baseline. We propose
+three related, non-exclusive explanations.
+
+\textbf{(a) Trainable capacity bottleneck.} We freeze the visual encoder
+and the bottom 16 of 24 XLM-R layers. The 110M trainable parameters
+concentrate in the top 8 text-encoder layers and the 512-d projection
+matrix. With 5\,K images, the InfoNCE loss reaches a regime where it
+exhausts this capacity in one epoch and any further training optimises a
+direction that does not generalise to held-out queries. The training log
+shows monotonically decreasing val\_loss across epochs 1--4 while val\_R@1
+monotonically declines, a signature of metric/loss disagreement that
+typically indicates over-specialisation rather than under-fitting.
+
+\textbf{(b) Saturation of pretrained alignment.} mCLIP's pretrained
+alignment between XLM-R text and CLIP visual embeddings is already strong
+on COCO-style data. The fine-tune is therefore not establishing new
+multilingual alignment from scratch; it is only re-fitting the
+512-dimensional shared subspace to the specific caption phrasings in our
+training set. On 5\,K examples this becomes a corpus-fitting task rather
+than a knowledge-acquisition task.
+
+\textbf{(c) MT noise floor.} All non-English captions are
+machine-translated from English by \texttt{opus-mt-en-X}. The captions
+share lexical patterns characteristic of MT (literal renderings, limited
+collocations, occasional malformed output). The model can fit these
+patterns but the gain does not transfer to the (also-MT-generated) test
+captions in any way that distinguishes from the pretrained baseline.
+
+\subsection{Cross-lingual homograph collision in Azerbaijani}
+\label{sec:homograph}
+During manual demo testing in Azerbaijani --- a language outside our
+fine-tuning set but included in XLM-R's pretrained languages --- we
+observed a reproducible failure of the retrieval system at very short
+queries. The Azerbaijani word \emph{it} means \emph{``dog''}; the same
+surface form \texttt{it} in English is a pronoun with weak, abstract
+embedding signal.
+
+\begin{itemize}[leftmargin=*,nosep]
+  \item Query \texttt{``it tullanır''} (``the dog is jumping''):
+    returns dog images. \emph{Correct.}
+  \item Query \texttt{``parkda it''} (``a dog in the park''):
+    returns dog images. \emph{Correct.}
+  \item Query \texttt{``it''} (single token): returns visually unrelated
+    images. \emph{Incorrect.}
+\end{itemize}
+
+\textbf{Mechanism.} When the query contains additional Azerbaijani-specific
+tokens (\textit{tullanır}, \textit{parkda}), the language context allows
+XLM-R to resolve \texttt{it} as the Azerbaijani noun. With the single
+token, no context is available, and the model's embedding is dominated by
+the English-pronoun sense (English being the highest-resource language in
+mCLIP's training distribution). The downstream visual retrieval then
+returns whatever images happen to align with the abstract pronoun
+embedding.
+
+\textbf{Fine-tuning cannot fix this.} Our fine-tuning corpus contains no
+Azerbaijani captions, so the AZ$\to$shared-space alignment is inherited
+verbatim from XLM-R pretraining. Contrastive fine-tuning on the other six
+languages does not reorganise the embedding for tokens it never sees.
+
+\textbf{Mitigation in deployment.} We add a frontend heuristic
+\texttt{isProbablyShortAze} that flags queries of 1--2 tokens containing
+Azerbaijani-specific orthographic characters
+(\textit{ə, ş, ğ, ç, ı, İ, Ü, ü, Ö, ö}) or surface forms in a curated list
+of known low-frequency single-token AZ words (\textit{it}, \textit{ev},
+\textit{at}, \textit{su}, \textit{yol}, \dots). When the heuristic fires
+the UI displays an inline warning suggesting that the user lengthen the
+query. The voice tab fires three variants of the same warning at different
+points in the user's flow: pre-search (when the user explicitly picks
+Azerbaijani in the language dropdown), post-detection (when Whisper
+auto-detects an out-of-set language), and post-transcription (when the
+returned transcript itself is short and probably Azerbaijani).
+
+\textbf{Why this matters for the project.}
+Cross-lingual homograph collisions are a known weakness of shared
+multilingual embeddings, but most published benchmarks use full-sentence
+queries that mask the issue. Retrieval at query time exposes it cleanly,
+because retrieval queries are typically short. Our project provides a
+specific, reproducible instance and a working UX-level mitigation.
+
+\subsection{Limitations}
+\begin{itemize}[leftmargin=*,nosep]
+\item The visual encoder is frozen; all fine-tuning gain depends on
+  text-side adaptation. Unfreezing the visual encoder, even partially,
+  is likely the highest-leverage next step (cf.\ \S\ref{sec:future}).
+\item Multilingual captions are MT-generated from English. As a
+  consequence, the text-bridge retriever (which matches queries directly
+  against the caption index) achieves trivially high Recall@1 because the
+  EN gallery contains exact source strings of the AR/ZH/FR/DE/RU
+  translations. The two-stage retriever, which matches against image
+  embeddings, is unaffected; all numbers in this report are two-stage.
+\item Whisper-small's transcription accuracy on Azerbaijani is moderate
+  at best. A larger Whisper variant (medium or large) would improve voice
+  results on low-resource languages but at the cost of CPU latency or
+  additional VRAM consumption.
+\item The gallery is 5{,}000 images, far smaller than production
+  galleries. Latency scaling, approximate-NN indexes, and engineering for
+  100M-scale retrieval are out of scope.
+\end{itemize}
+
+% ====================== 8. Future Work ======================
+\section{Future Work}\label{sec:future}
+
+\textbf{Unfreezing the visual encoder.} The most likely path to a
+meaningful R@1 lift is to thaw the bottom few layers of the CLIP ViT,
+trading VRAM headroom for visual-side adaptation. A staged
+freeze-then-thaw schedule should be tested.
+
+\textbf{Including Azerbaijani in fine-tuning.} The homograph collision
+documented in \S\ref{sec:homograph} is partially correctable by including
+Azerbaijani captions in the fine-tuning set, even if those captions are
+themselves machine-translated. This would force the AZ$\to$shared-space
+alignment to be optimised rather than inherited verbatim from pretraining.
+
+\textbf{Replacing MT-generated captions with human translations on a
+subset.} A small held-out human-translated test set would let us
+disentangle the model's quality from MT artefacts in the test queries
+themselves.
+
+\textbf{Attention-based explanation overlay.} Showing the user which
+image patches contributed most to the retrieval score would both improve
+trust in the system and expose interesting per-language attention
+patterns.
+
+\textbf{Larger Whisper variant on demand.} The voice tab could
+optionally switch to \texttt{whisper-medium} when the user selects a
+low-resource language, accepting higher CPU latency for better
+transcription accuracy.
+
+% ====================== 9. Conclusion ======================
+\section{Conclusion}
+
+We presented a multilingual text-to-image retrieval system that combines a
+fine-tuned mCLIP backbone, an OpenAI Whisper-small voice front end, and a
+FAISS-based retrieval index, exposed through a FastAPI backend and a React
+frontend. The system supports three input modalities --- text, voice,
+image --- against a shared 512-dimensional embedding space and a
+5{,}000-image gallery.
+
+Our controlled comparison of pretrained vs.\ fine-tuned weights across six
+languages produces a null result on overall Recall@1, accompanied by a
+small positive shift on Recall@5 and mAP@10. We propose a
+trainable-capacity bottleneck hypothesis to explain the absence of a
+5$\times$-data lift and support it with the training trajectory. Beyond
+the quantitative findings, we documented a specific cross-lingual
+homograph collision encountered in Azerbaijani queries, identified its
+mechanism in mCLIP's shared embedding space, and shipped a deployable
+UX-level mitigation in the frontend.
+
+The codebase, the reproducible scripts, the evaluation reports, and the
+frontend are released at
+\href{https://github.com/Bayrii/text2image-multilingual-retrieval}
+{github.com/Bayrii/text2image-multilingual-retrieval}.
+
+% ====================== Appendix ======================
+\appendix
+\section{Reproducing the pipeline}
+\begin{lstlisting}[language=bash, caption={Commands to reproduce all reported numbers.}]
+# Dependencies
+pip install -r requirements.txt
+cd frontend && npm install && cd ..
+
+# Data
+python scripts/01_download_data.py     # ~10 min, 5000 images
+python scripts/02_translate.py         # ~60 min, 5 langs x 25k captions
+python scripts/03_build_dataset.py     # < 1 min
+
+# Train
+python scripts/04_train.py             # ~30-40 min / epoch on RTX 3060
+
+# Evaluate
+python scripts/05_build_index.py       # ~11 min, builds image + text idx
+python scripts/08_compare_models.py    # ~15 min, writes reports/comparison/
+
+# Serve
+python -m backend.main                 # FastAPI on :8000
+cd frontend && npm run dev             # Vite on :5173
+\end{lstlisting}
+
+\section{Configuration excerpt}
+\begin{lstlisting}[language=yaml, caption={Final \texttt{config/config.yaml}.}]
+data:
+  max_images: 5000
+  languages: [en, ar, zh, fr, de, ru]
+  val_split: 0.1
+  test_split: 0.1
+model:
+  mclip_model: "M-CLIP/XLM-Roberta-Large-Vit-B-32"
+  clip_visual: "openai/clip-vit-base-patch32"
+  embedding_dim: 512
+  freeze_visual_encoder: true
+  freeze_text_layers_below: 16
+  gradient_checkpointing: true
+training:
+  batch_size: 8
+  learning_rate: 1.0e-5
+  warmup_steps: 300
+  max_epochs: 15
+  gradient_accumulation_steps: 16
+  mixed_precision: true
+  temperature: 0.07
+  hard_negatives_per_sample: 1
+  early_stopping_patience: 4
+retrieval:
+  faiss_index_type: "flat_ip"
+  top_n_stage1: 100
+  top_k_stage2: 5
+\end{lstlisting}
+
+\section{Eval heatmap (two-stage retriever)}
+Figure~\ref{fig:heatmap} shows the per-language Recall@K heatmap from the
+standalone evaluation script (\texttt{scripts/06\_evaluate.py}), included
+here for completeness.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{recall_heatmap}
+\caption{Recall@K heatmap for the two-stage retriever, per language.}
+\label{fig:heatmap}
+\end{figure}
+
+% ====================== References ======================
+\begin{thebibliography}{9}
+
+\bibitem{clip}
+A.~Radford et al. ``Learning Transferable Visual Models from Natural
+Language Supervision''. \emph{ICML}, 2021.
+
+\bibitem{mclip}
+F.~Carlsson et al. ``Cross-lingual and Multilingual CLIP''. \emph{LREC},
+2022.
+
+\bibitem{whisper}
+A.~Radford et al. ``Robust Speech Recognition via Large-Scale Weak
+Supervision''. OpenAI Tech Report, 2022.
+
+\bibitem{faiss}
+J.~Johnson, M.~Douze, H.~J\'egou. ``Billion-scale similarity search with
+GPUs''. \emph{IEEE Trans.\ Big Data}, 2019.
+
+\bibitem{xlmr}
+A.~Conneau et al. ``Unsupervised Cross-lingual Representation Learning
+at Scale''. \emph{ACL}, 2020.
+
+\bibitem{laser}
+M.~Artetxe, H.~Schwenk. ``Massively Multilingual Sentence Embeddings for
+Zero-Shot Cross-Lingual Transfer and Beyond''. \emph{TACL}, 2019.
+
+\bibitem{coco}
+T.-Y. Lin et al. ``Microsoft COCO: Common Objects in Context''.
+\emph{ECCV}, 2014.
+
+\bibitem{opusmt}
+J.~Tiedemann, S.~Thottingal. ``OPUS-MT --- Building open translation
+services for the World''. \emph{EAMT}, 2020.
+
+\end{thebibliography}
+
+\end{document}

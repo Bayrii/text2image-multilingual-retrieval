@@ -1,0 +1,46 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+.env
+
+# ---- Node / React (frontend) ----
+node_modules/
+dist/
+.vite/
+*.log
+*.tsbuildinfo
+
+# ---- ML artifacts (multi-GB, regenerable via scripts/01..05) ----
+.cache/
+data/images/
+data/raw/
+data/processed/
+embeddings/
+checkpoints/
+*.npy
+*.index
+*.parquet
+
+# Keep the small comparison reports + metric JSONs (committed deliverables).
+# To re-generate plots run scripts/08_compare_models.py
+!reports/
+!reports/**
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---- Project-specific ----
+pipeline.log
+probe.log
+probe_v2.log
+.claude/settings.local.json
